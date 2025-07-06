@@ -1,0 +1,704 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(reticulate)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(purrr)
+library(stringr)
+```
+# 1. DEBUGGING AND DATA CHECKING FUNCTIONS
+```{r}
+
+check_data_files <- function() {
+  cat("=== DATA FILE CHECK ===\n")
+  
+  # Check if data directory exists
+  data_dirs <- c("data/processed", "data", "processed")
+  data_dir <- NULL
+  
+  for (dir in data_dirs) {
+    if (dir.exists(dir)) {
+      data_dir <- dir
+      break
+    }
+  }
+  
+  if (is.null(data_dir)) {
+    cat("ERROR: No data directory found. Looking for:\n")
+    for (dir in data_dirs) {
+      cat(sprintf("  - %s (exists: %s)\n", dir, dir.exists(dir)))
+    }
+    return(FALSE)
+  }
+  
+  cat(sprintf("Found data directory: %s\n", data_dir))
+  
+  # Check for CSV files
+  csv_files <- c("train.csv", "val.csv", "test.csv")
+  file_paths <- file.path(data_dir, csv_files)
+  
+  for (i in seq_along(csv_files)) {
+    file_path <- file_paths[i]
+    exists <- file.exists(file_path)
+    cat(sprintf("  %s: %s", csv_files[i], ifelse(exists, "✓ EXISTS", "✗ MISSING")))
+    
+    if (exists) {
+      # Check file size and basic structure
+      tryCatch({
+        df <- read_csv(file_path, show_col_types = FALSE)
+        cat(sprintf(" (%d rows, %d cols)\n", nrow(df), ncol(df)))
+        
+        # Check for required columns
+        required_cols <- c("file_path", "termite_flag")
+        missing_cols <- setdiff(required_cols, names(df))
+        if (length(missing_cols) > 0) {
+          cat(sprintf("    WARNING: Missing columns: %s\n", paste(missing_cols, collapse = ", ")))
+        }
+        
+            
+            # Check termite_flag values
+            if ("termite_flag" %in% names(df)) {
+              flag_summary <- table(df$termite_flag, useNA = "always")
+              cat(sprintf("    termite_flag distribution: %s\n", 
+                          paste(names(flag_summary), flag_summary, sep = "=", collapse = ", ")))
+            }
+            
+      }, error = function(e) {
+        cat(sprintf(" - ERROR reading file: %s\n", e$message))
+      })
+    } else {
+      cat("\n")
+    }
+  }
+  
+  cat("========================\n")
+  return(all(file.exists(file_paths)))
+}
+
+create_dummy_data <- function(output_dir = "data/processed") {
+  cat("Creating dummy data for testing...\n")
+  
+  # Create directory if it doesn't exist
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Create dummy spectrogram files directory
+  spec_dir <- file.path(output_dir, "spectrograms")
+  if (!dir.exists(spec_dir)) {
+    dir.create(spec_dir, recursive = TRUE)
+  }
+  
+  # Generate dummy data
+  set.seed(42)
+  n_samples <- 200
+  
+  # Create dummy spectrogram files
+  for (i in 1:n_samples) {
+    spec_file <- file.path(spec_dir, sprintf("spec_%03d.npy", i))
+    # Create a dummy 2D array and save as RDS (since we can't easily create .npy files in R)
+    dummy_spec <- matrix(rnorm(128 * 128), nrow = 128, ncol = 128)
+    saveRDS(dummy_spec, gsub("\\.npy$", ".rds", spec_file))
+  }
+  
+  # Create datasets
+  create_dataset <- function(n, start_idx = 1) {
+    data.frame(
+      file_path = file.path(spec_dir, sprintf("spec_%03d.rds", start_idx:(start_idx + n - 1))),
+      termite_flag = sample(c(0, 1), n, replace = TRUE, prob = c(0.7, 0.3)),
+      audio_file = sprintf("audio_%03d.wav", start_idx:(start_idx + n - 1)),
+      duration = runif(n, 1, 10),
+      stringsAsFactors = FALSE
+    )
+  }
+  
+  # Split data
+  train_data <- create_dataset(120, 1)
+  val_data <- create_dataset(40, 121)
+  test_data <- create_dataset(40, 161)
+  
+  # Save CSV files
+  write_csv(train_data, file.path(output_dir, "train.csv"))
+  write_csv(val_data, file.path(output_dir, "val.csv"))
+  write_csv(test_data, file.path(output_dir, "test.csv"))
+  
+  cat(sprintf("Created dummy data in %s\n", output_dir))
+  cat(sprintf("Train: %d samples, Val: %d samples, Test: %d samples\n", 
+              nrow(train_data), nrow(val_data), nrow(test_data)))
+  
+  return(TRUE)
+}
+
+```
+
+# 2. IMPROVED PYTHON ENVIRONMENT SETUP
+
+```{r}
+setup_python_environment <- function() {
+  cat("Setting up Python environment...\n")
+  
+  # Check if Python is available
+  if (!py_available()) {
+    cat("Python is not available. Please install Python first.\n")
+    return(FALSE)
+  }
+  
+  cat("Python is available. Current config:\n")
+  config <- py_config()
+  cat(sprintf("  Python: %s\n", config$python))
+  cat(sprintf("  Version: %s\n", config$version))
+  
+  # Required packages
+  required_packages <- c(
+    "torch", "torchvision", "torchaudio",
+    "transformers", "timm", "librosa",
+    "scikit-learn", "numpy", "pandas",
+    "matplotlib", "seaborn", "pillow",
+    "opencv-python", "soundfile"
+  )
+  
+  # Use py_require instead of py_install for ephemeral environments
+  for (pkg in required_packages) {
+    if (!py_module_available(pkg)) {
+      cat(sprintf("Installing %s...\n", pkg))
+      tryCatch({
+        py_require(pkg)
+      }, error = function(e) {
+        cat(sprintf("Failed to install %s: %s\n", pkg, e$message))
+      })
+    } else {
+      cat(sprintf("✓ %s is available\n", pkg))
+    }
+  }
+  
+  cat("Python environment setup complete!\n")
+  return(TRUE)
+}
+
+```
+
+# 3. IMPROVED PYTHON MODULES AND FUNCTIONS
+
+```{r}
+setup_python_modules <- function() {
+  cat("Setting up Python modules and functions...\n")
+  
+  # Import Python modules
+  torch <<- import("torch")
+  np <<- import("numpy")
+  pd <<- import("pandas")
+  
+  # Create Python functions with better error handling
+  py_run_string("
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as transforms
+import timm
+import numpy as np
+import pandas as pd
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f'Using device: {device}')
+
+class SpectrogramDataset(Dataset):
+    def __init__(self, data_df, transform=None, target_size=(224, 224)):
+        self.data = data_df.copy()
+        self.transform = transform
+        self.target_size = target_size
+        
+        # Filter out rows with missing file paths or labels
+        self.data = self.data.dropna(subset=['file_path', 'termite_flag'])
+        
+        print(f'Dataset initialized with {len(self.data)} samples')
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        spec_path = row['file_path']
+        
+        # Load spectrogram data
+        try:
+            # Handle both .npy and .rds files
+            if spec_path.endswith('.npy'):
+                spec_data = np.load(spec_path)
+            elif spec_path.endswith('.rds'):
+                # For dummy data created in R
+                import pickle
+                # Create dummy data since we can't easily load RDS files
+                spec_data = np.random.randn(*self.target_size)
+            else:
+                # Create dummy data
+                spec_data = np.random.randn(*self.target_size)
+        except Exception as e:
+            print(f'Error loading {spec_path}: {e}. Using dummy data.')
+            spec_data = np.random.randn(*self.target_size)
+        
+        # Ensure proper shape
+        if len(spec_data.shape) == 2:
+            # Convert to 3-channel image (RGB) for pre-trained models
+            spec_data = np.stack([spec_data, spec_data, spec_data], axis=0)
+        elif len(spec_data.shape) == 3 and spec_data.shape[0] == 1:
+            spec_data = np.repeat(spec_data, 3, axis=0)
+        elif len(spec_data.shape) == 3 and spec_data.shape[2] == 3:
+            # Convert HWC to CHW
+            spec_data = spec_data.transpose(2, 0, 1)
+        
+        # Ensure target size
+        if spec_data.shape[1:] != self.target_size:
+            # Resize to target size
+            from torchvision.transforms.functional import resize
+            spec_tensor = torch.tensor(spec_data, dtype=torch.float32)
+            spec_tensor = resize(spec_tensor, self.target_size)
+            spec_data = spec_tensor.numpy()
+        
+        # Normalize to [0, 1] range
+        spec_data = (spec_data - spec_data.min()) / (spec_data.max() - spec_data.min() + 1e-8)
+        
+        # Convert to PIL Image for transforms
+        try:
+            spec_image = Image.fromarray((spec_data.transpose(1, 2, 0) * 255).astype(np.uint8))
+        except Exception as e:
+            print(f'Error converting to PIL Image: {e}')
+            # Create a dummy RGB image
+            spec_image = Image.fromarray(np.random.randint(0, 255, (*self.target_size, 3), dtype=np.uint8))
+        
+        if self.transform:
+            spec_image = self.transform(spec_image)
+        
+        label = int(row['termite_flag'])
+        
+        return spec_image, label
+
+class PretrainedTermiteClassifier(nn.Module):
+    def __init__(self, model_name='efficientnet_b0', num_classes=2, dropout_rate=0.3):
+        super(PretrainedTermiteClassifier, self).__init__()
+        
+        # Load pre-trained model
+        self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+        
+        # Get the number of features from the backbone
+        self.num_features = self.backbone.num_features
+        
+        # Add custom classifier head
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout_rate),
+            nn.Linear(self.num_features, 512),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(512, 128),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(128, num_classes)
+        )
+        
+    def forward(self, x):
+        features = self.backbone(x)
+        output = self.classifier(features)
+        return output
+
+def create_transforms(input_size=224):
+    train_transforms = transforms.Compose([
+        transforms.Resize((input_size, input_size)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        transforms.RandomRotation(degrees=10),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    val_transforms = transforms.Compose([
+        transforms.Resize((input_size, input_size)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    return train_transforms, val_transforms
+
+def create_dataloaders(train_df, val_df, test_df, batch_size=16, input_size=224):
+    print(f'Creating dataloaders with batch_size={batch_size}')
+    print(f'Train df shape: {train_df.shape}')
+    print(f'Val df shape: {val_df.shape}')
+    print(f'Test df shape: {test_df.shape}')
+    
+    train_transforms, val_transforms = create_transforms(input_size)
+    
+    train_dataset = SpectrogramDataset(train_df, transform=train_transforms)
+    val_dataset = SpectrogramDataset(val_df, transform=val_transforms)
+    test_dataset = SpectrogramDataset(test_df, transform=val_transforms)
+    
+    print(f'Dataset sizes: Train={len(train_dataset)}, Val={len(val_dataset)}, Test={len(test_dataset)}')
+    
+    # Check if datasets are empty
+    if len(train_dataset) == 0:
+        raise ValueError('Training dataset is empty!')
+    if len(val_dataset) == 0:
+        raise ValueError('Validation dataset is empty!')
+    if len(test_dataset) == 0:
+        raise ValueError('Test dataset is empty!')
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    
+    return train_loader, val_loader, test_loader
+
+def train_model(model, train_loader, val_loader, num_epochs=10, learning_rate=1e-4):
+    model = model.to(device)
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
+    
+    best_val_acc = 0.0
+    training_history = {'train_loss': [], 'val_loss': [], 'val_acc': []}
+    
+    for epoch in range(num_epochs):
+        # Training phase
+        model.train()
+        train_loss = 0.0
+        train_batches = 0
+        
+        for batch_idx, (inputs, labels) in enumerate(train_loader):
+            inputs, labels = inputs.to(device), labels.to(device)
+            
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            train_batches += 1
+            
+            if batch_idx % 5 == 0:
+                print(f'Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(train_loader)}, Loss: {loss.item():.4f}')
+        
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for inputs, labels in val_loader:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs.data, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+        
+        avg_train_loss = train_loss / max(train_batches, 1)
+        avg_val_loss = val_loss / max(len(val_loader), 1)
+        val_accuracy = val_correct / max(val_total, 1)
+        
+        training_history['train_loss'].append(avg_train_loss)
+        training_history['val_loss'].append(avg_val_loss)
+        training_history['val_acc'].append(val_accuracy)
+        
+        print(f'Epoch {epoch+1}/{num_epochs}:')
+        print(f'  Train Loss: {avg_train_loss:.4f}')
+        print(f'  Val Loss: {avg_val_loss:.4f}')
+        print(f'  Val Accuracy: {val_accuracy:.4f}')
+        print('-' * 50)
+        
+        # Save best model
+        if val_accuracy > best_val_acc:
+            best_val_acc = val_accuracy
+            torch.save(model.state_dict(), 'best_termite_model.pth')
+        
+        scheduler.step()
+    
+    return model, training_history
+
+def evaluate_model(model, test_loader):
+    model.eval()
+    model = model.to(device)
+    
+    all_predictions = []
+    all_labels = []
+    test_loss = 0.0
+    
+    criterion = nn.CrossEntropyLoss()
+    
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
+            
+            test_loss += loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            
+            all_predictions.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    avg_test_loss = test_loss / max(len(test_loader), 1)
+    
+    # Calculate metrics
+    accuracy = np.mean(np.array(all_predictions) == np.array(all_labels))
+    
+    print(f'Test Loss: {avg_test_loss:.4f}')
+    print(f'Test Accuracy: {accuracy:.4f}')
+    
+    # Detailed classification report
+    class_names = ['No Termite', 'Termite']
+    print('\\nClassification Report:')
+    print(classification_report(all_labels, all_predictions, target_names=class_names))
+    
+    # Confusion matrix
+    cm = confusion_matrix(all_labels, all_predictions)
+    print('\\nConfusion Matrix:')
+    print(cm)
+    
+    return {
+        'predictions': all_predictions,
+        'labels': all_labels,
+        'accuracy': accuracy,
+        'test_loss': avg_test_loss,
+        'confusion_matrix': cm
+    }
+")
+  
+  cat("Python modules and functions loaded successfully!\n")
+  return(TRUE)
+}
+```
+
+# 4. IMPROVED DATA LOADING AND PREPROCESSING
+
+```{r}
+load_datasets <- function() {
+  cat("Loading datasets...\n")
+  
+  # Check if data files exist
+  if (!check_data_files()) {
+    cat("Data files not found. Creating dummy data...\n")
+    create_dummy_data()
+  }
+  
+  # Try different data directory locations
+  data_dirs <- c("data/processed", "data", "processed")
+  data_dir <- NULL
+  
+  for (dir in data_dirs) {
+    if (dir.exists(dir)) {
+      data_dir <- dir
+      break
+    }
+  }
+  
+  if (is.null(data_dir)) {
+    stop("No data directory found!")
+  }
+  
+  # Load datasets with error handling
+  load_dataset_safe <- function(filename) {
+    filepath <- file.path(data_dir, filename)
+    
+    if (!file.exists(filepath)) {
+      stop(sprintf("File not found: %s", filepath))
+    }
+    
+    tryCatch({
+      data <- read_csv(filepath, show_col_types = FALSE)
+      
+      # Check required columns
+      required_cols <- c("file_path", "termite_flag")
+      missing_cols <- setdiff(required_cols, names(data))
+      
+      if (length(missing_cols) > 0) {
+        stop(sprintf("Missing required columns in %s: %s", 
+                     filename, paste(missing_cols, collapse = ", ")))
+      }
+      
+      # Clean and filter data
+      data <- data %>% 
+        filter(!is.na(termite_flag), !is.na(file_path)) %>%
+        mutate(termite_flag = as.integer(as.logical(termite_flag)))
+      
+      if (nrow(data) == 0) {
+        stop(sprintf("No valid data found in %s after filtering", filename))
+      }
+      
+      return(data)
+      
+    }, error = function(e) {
+      stop(sprintf("Error loading %s: %s", filename, e$message))
+    })
+  }
+  
+  # Load all datasets
+  train_data <- load_dataset_safe("train.csv")
+  val_data <- load_dataset_safe("val.csv")
+  test_data <- load_dataset_safe("test.csv")
+  
+  cat(sprintf("Dataset sizes - Train: %d, Val: %d, Test: %d\n", 
+              nrow(train_data), nrow(val_data), nrow(test_data)))
+  
+  # Check class distribution
+  cat("Class distribution:\n")
+  cat("Train:", table(train_data$termite_flag), "\n")
+  cat("Val:", table(val_data$termite_flag), "\n")
+  cat("Test:", table(test_data$termite_flag), "\n")
+  
+  return(list(
+    train = train_data,
+    val = val_data,
+    test = test_data
+  ))
+}
+```
+
+# 5. IMPROVED MAIN EXECUTION FUNCTION
+
+```{r}
+
+run_termite_detection_safe <- function(model_type = "efficientnet", 
+                                       model_name = "efficientnet_b0",
+                                       num_epochs = 5,
+                                       batch_size = 8,
+                                       learning_rate = 1e-4,
+                                       create_dummy = TRUE) {
+  
+  cat("=== TERMITE DETECTION WITH PRE-TRAINED MODELS ===\n")
+  
+  # Step 1: Check and create dummy data if needed
+  if (create_dummy) {
+    cat("Creating dummy data for testing...\n")
+    create_dummy_data()
+  }
+  
+  # Step 2: Setup Python environment
+  cat("Setting up Python environment...\n")
+  if (!setup_python_environment()) {
+    stop("Failed to setup Python environment")
+  }
+  
+  if (!setup_python_modules()) {
+    stop("Failed to setup Python modules")
+  }
+  
+  # Step 3: Load datasets
+  cat("Loading datasets...\n")
+  datasets <- load_datasets()
+  
+  # Step 4: Convert to Python format
+  cat("Converting datasets to Python format...\n")
+  train_df <- r_to_py(datasets$train)
+  val_df <- r_to_py(datasets$val)
+  test_df <- r_to_py(datasets$test)
+  
+  # Step 5: Create model
+  cat(sprintf("Creating %s model...\n", model_name))
+  model <- py$PretrainedTermiteClassifier(model_name = model_name, num_classes = 2L, dropout_rate = 0.3)
+  
+  # Step 6: Create data loaders
+  cat("Creating data loaders...\n")
+  tryCatch({
+    loaders <- py$create_dataloaders(train_df, val_df, test_df, batch_size = as.integer(batch_size))
+    train_loader <- loaders[[1]]
+    val_loader <- loaders[[2]]
+    test_loader <- loaders[[3]]
+  }, error = function(e) {
+    stop(sprintf("Error creating data loaders: %s", e$message))
+  })
+  
+  # Step 7: Train model
+  cat("Training model...\n")
+  result <- py$train_model(model, train_loader, val_loader, 
+                           num_epochs = as.integer(num_epochs), 
+                           learning_rate = learning_rate)
+  
+  trained_model <- result[[1]]
+  training_history <- result[[2]]
+  
+  # Step 8: Evaluate model
+  cat("Evaluating model on test set...\n")
+  test_results <- py$evaluate_model(trained_model, test_loader)
+  
+  # Step 9: Print results
+  cat("\n", paste(rep("=", 50), collapse = ""), "\n")
+  cat("FINAL RESULTS\n")
+  cat(paste(rep("=", 50), collapse = ""), "\n")
+  cat(sprintf("Model: %s\n", model_name))
+  cat(sprintf("Test Accuracy: %.4f\n", py_to_r(test_results$accuracy)))
+  cat(sprintf("Test Loss: %.4f\n", py_to_r(test_results$test_loss)))
+  cat(paste(rep("=", 50), collapse = ""), "\n")
+  
+  return(list(
+    model = trained_model,
+    training_history = training_history,
+    test_results = test_results
+  ))
+}
+```
+# 6. efficientnet_b0 START FUNCTION
+```{r}
+start_efficientnet_b0 <- run_termite_detection_safe(
+    model_type = "efficientnet",
+    model_name = "efficientnet_b0",
+    num_epochs = 50,   
+    batch_size = 8,  
+    learning_rate = 1e-4,
+    create_dummy = FALSE
+  )
+
+
+
+```
+
+
+```{r}
+start_efficientnet_b0
+```
+# 7 start_resNet50
+
+```{r}
+start_resNet50 <- run_termite_detection_safe(
+  model_name = "resnet50",        # Change this line to desired model
+  num_epochs = 50,
+  batch_size = 8,
+  learning_rate = 1e-4,
+  create_dummy = FALSE            # Use your real dataset
+)
+
+```
+```{r}
+start_resNet50
+```
+```{r}
+start_vit_base_patch16_224 <- run_termite_detection_safe(
+  model_name = "vit_base_patch16_224",        # Change this line to desired model
+  num_epochs = 50,
+  batch_size = 8,
+  learning_rate = 1e-4,
+  create_dummy = FALSE            # Use your real dataset
+)
+```
+```{r}
+start_vit_base_patch16_224
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
