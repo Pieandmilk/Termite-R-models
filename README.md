@@ -13,7 +13,7 @@ This project implements a system for detecting termites based on **spectrogram i
 - [Model Training and Evaluation](#model-training-and-evaluation)  
 - [Results](#results)  
 - [Usage](#usage)  
-- [Contributing](#contributing)  
+
 
 ---
 
