@@ -210,11 +210,4 @@ start_vit_base_patch16_224 <- run_termite_detection_safe(
 )
 ```
 
----
 
-## 🤝 Contributing
-
-Feel free to fork this repository, make improvements, and submit pull requests.  
-Suggestions for new models, features, or bug fixes are welcome.
-
----
